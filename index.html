@@ -39,6 +39,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MindARThree } from 'mindar-image-three';
+import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 
 // ---- CONFIG -------------------------------------------------------------
 // Height / width of your postcard artwork (the image you compiled into the .mind file).
@@ -89,16 +90,30 @@ async function startAR(content) {
   const mindarThree = new MindARThree({
     container: document.getElementById('ar'),
     imageTargetSrc: TARGET_FILE,
-    maxTrack: 2,
     uiLoading: 'no', uiScanning: 'no', uiError: 'no'
   });
   const { renderer, scene, camera } = mindarThree;
   scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.2));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+  sun.position.set(1, 2, 3);
+  scene.add(sun);
 
-  // Load the GLB once and clone it per target
-  const gltf = content.model ? await new GLTFLoader().loadAsync(content.model) : null;
+  // Load the GLB once; if it fails, carry on with just the message panel
+  let gltf = null, fit = 1, center = new THREE.Vector3();
+  if (content.model) {
+    try {
+      gltf = await new GLTFLoader().loadAsync(content.model);
+      const box = new THREE.Box3().setFromObject(gltf.scene);
+      const size = box.getSize(new THREE.Vector3());
+      box.getCenter(center);
+      fit = (content.modelSize || 0.4) / Math.max(size.x, size.y, size.z);
+      console.log('GLB loaded:', content.model, 'size', size, 'animations:', gltf.animations.map(a => a.name));
+    } catch (e) {
+      console.error('GLB failed to load:', content.model, e);
+    }
+  }
 
-  const panels = [], models = [];
+  const panels = [], mixers = [];
   TARGET_ASPECTS.forEach((aspect, i) => {
     const anchor = mindarThree.addAnchor(i);
 
@@ -108,12 +123,20 @@ async function startAR(content) {
     panels.push(panel);
 
     if (gltf) {
-      const m = gltf.scene.clone(true);
-      m.scale.setScalar(content.modelScale || 0.3);
-      m.position.set(0, aspect * 0.5 + 0.15, 0.1);
+      const holder = new THREE.Group();
+      const m = cloneSkinned(gltf.scene);
+      m.position.sub(center);                       // center the model on the holder
       m.rotation.x = Math.PI / 2;
-      anchor.group.add(m);
-      models.push(m);
+      holder.add(m);
+      holder.scale.setScalar(fit);
+      holder.position.set(0, aspect * 0.25 + 0.125, 0.125);   // above the card's top edge
+      anchor.group.add(holder);
+
+      if (gltf.animations.length) {
+        const mixer = new THREE.AnimationMixer(m);
+        gltf.animations.forEach(clip => mixer.clipAction(clip).play());
+        mixers.push(mixer);
+      }
     }
 
     anchor.onTargetFound = () => { console.log('found target', i); hint.classList.add('hidden'); };
@@ -125,9 +148,10 @@ async function startAR(content) {
 
   const clock = new THREE.Clock();
   renderer.setAnimationLoop(() => {
-    const t = clock.getElapsedTime();
+    const dt = clock.getDelta();
+    const t = clock.elapsedTime;
     panels.forEach(p => { p.position.z = 0.03 + Math.sin(t * 1.5) * 0.01; });
-    models.forEach(m => { m.rotation.z = t * 0.6; });
+    mixers.forEach(mx => mx.update(dt));
     renderer.render(scene, camera);
   });
 }

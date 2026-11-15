@@ -2,5 +2,6 @@
   "name": "Alex",
   "message": "Thank you for taking the time to talk with me. Your advice genuinely changed how I'm approaching my next step.",
   "signoff": "- Nikki",
-  "model": "models/Untitled.glb"
+  "model": "models/Untitled.glb",
+  "modelSize": 0.2
 }
