@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>A little thank you</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; color: #fff;
+    font-family: system-ui, -apple-system, Helvetica, Arial, sans-serif; overflow: hidden; }
+  #ar { position: fixed; inset: 0; }
+  #overlay { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 16px; padding: 24px; text-align: center; background: #111; z-index: 10; }
+  #overlay button { font-size: 18px; padding: 14px 28px; border: 0; border-radius: 999px;
+    background: #fff; color: #111; }
+  #hint { position: fixed; left: 0; right: 0; bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    text-align: center; font-size: 15px; opacity: .85; z-index: 5; pointer-events: none; }
+  #hint.hidden { display: none; }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+    "mindar-image-three": "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="ar"></div>
+<div id="overlay">
+  <div id="intro">Loading…</div>
+  <button id="start" hidden>Start</button>
+</div>
+<div id="hint" class="hidden">Point your camera at the postcard</div>
+//test
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MindARThree } from 'mindar-image-three';
+
+// ---- CONFIG -------------------------------------------------------------
+// Height / width of your postcard artwork (the image you compiled into the .mind file).
+// e.g. a 6x4 in landscape card = 4/6 = 0.667. Measure the TARGET IMAGE, not the whole card.
+const TARGET_ASPECTS = [0.767, 0.667];
+const TARGET_FILE = './targets/postcard.mind';
+// -------------------------------------------------------------------------
+
+const introEl = document.getElementById('intro');
+const startBtn = document.getElementById('start');
+const overlay = document.getElementById('overlay');
+const hint = document.getElementById('hint');
+
+// 1. Read the recipient ID from the URL (?id=a8f3k2) and load their content.
+const rawId = new URLSearchParams(location.search).get('id') || 'demo';
+const id = rawId.toLowerCase().replace(/[^a-z0-9-]/g, '');   // sanitize
+
+let content;
+try {
+  const res = await fetch(`./messages/${id}.json`, { cache: 'no-cache' });
+  if (!res.ok) throw new Error('not found');
+  content = await res.json();
+} catch (e) {
+  introEl.textContent = "Hmm, I couldn't find this card's message. Check the QR code or try again.";
+  throw e;
+}
+
+introEl.innerHTML = `<h2 style="margin:0">Hi ${escapeHtml(content.name || '')}</h2>
+  <p style="margin:0;opacity:.8">Tap start, then point your camera at the postcard.</p>`;
+startBtn.hidden = false;
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  startBtn.textContent = 'Starting camera…';
+  try {
+    await startAR(content);
+    overlay.style.display = 'none';
+    hint.classList.remove('hidden');
+  } catch (err) {
+    console.error(err);
+    startBtn.disabled = false;
+    startBtn.textContent = 'Start';
+    introEl.innerHTML = `<p>Couldn't start the camera. Please allow camera access, or open this link in Safari / Chrome.</p>`;
+  }
+});
+
+async function startAR(content) {
+  const mindarThree = new MindARThree({
+    container: document.getElementById('ar'),
+    imageTargetSrc: TARGET_FILE,
+    maxTrack: 2,
+    uiLoading: 'no', uiScanning: 'no', uiError: 'no'
+  });
+  const { renderer, scene, camera } = mindarThree;
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.2));
+
+  // Load the GLB once and clone it per target
+  const gltf = content.model ? await new GLTFLoader().loadAsync(content.model) : null;
+
+  const panels = [], models = [];
+  TARGET_ASPECTS.forEach((aspect, i) => {
+    const anchor = mindarThree.addAnchor(i);
+
+    const panel = makeMessagePanel(content.message || '', content.signoff || '', aspect);
+    panel.position.set(0, 0, 0.03);
+    anchor.group.add(panel);
+    panels.push(panel);
+
+    if (gltf) {
+      const m = gltf.scene.clone(true);
+      m.scale.setScalar(content.modelScale || 0.3);
+      m.position.set(0, aspect * 0.5 + 0.15, 0.1);
+      m.rotation.x = Math.PI / 2;
+      anchor.group.add(m);
+      models.push(m);
+    }
+
+    anchor.onTargetFound = () => { console.log('found target', i); hint.classList.add('hidden'); };
+    anchor.onTargetLost  = () => hint.classList.remove('hidden');
+  });
+
+  console.log('anchors created:', TARGET_ASPECTS.length);
+  await mindarThree.start();
+
+  const clock = new THREE.Clock();
+  renderer.setAnimationLoop(() => {
+    const t = clock.getElapsedTime();
+    panels.forEach(p => { p.position.z = 0.03 + Math.sin(t * 1.5) * 0.01; });
+    models.forEach(m => { m.rotation.z = t * 0.6; });
+    renderer.render(scene, camera);
+  });
+}
+
+function makeMessagePanel(message, signoff, aspect) {
+  const W = 1024, H = Math.round(1024 * aspect);
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d');
+
+  g.fillStyle = 'rgba(20,20,24,0.82)';
+  roundRect(g, 0, 0, W, H, 40); g.fill();
+
+  g.fillStyle = '#fff';
+  g.textBaseline = 'top';
+  g.font = '600 54px system-ui, -apple-system, Helvetica, Arial, sans-serif';
+  const lines = wrap(g, message, W - 120);
+  let y = 60;
+  for (const line of lines) { g.fillText(line, 60, y); y += 70; }
+
+  if (signoff) {
+    g.font = 'italic 44px system-ui, -apple-system, Helvetica, Arial, sans-serif';
+    g.fillText(signoff, 60, Math.min(y + 30, H - 90));
+  }
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true });
+  // Panel covers ~80% of the target's width; tweak scale to taste.
+  return new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.8 * aspect), mat);
+}
+
+function wrap(ctx, text, maxWidth) {
+  const out = [];
+  for (const para of String(text).split('\n')) {
+    let line = '';
+    for (const word of para.split(' ')) {
+      const test = line ? line + ' ' + word : word;
+      if (ctx.measureText(test).width > maxWidth && line) { out.push(line); line = word; }
+      else line = test;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, ch => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[ch]));
+}
+</script>
+</body>
+</html>
